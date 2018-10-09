@@ -1,0 +1,119 @@
+REPO MANAGER DOCUMENTATION
+==========================
+
+- [OVERVIEW](#overview)
+- [ARCHITECTURE](#architecture)
+- [CITRIX APPLICATION](#citrix-application)
+- [COMPONENTS](#components)
+
+## OVERVIEW
+
+The application Repo Manager is a Citrix desktop tool that is used by the Treasury team namely Jackie, Joseph Iliardi, Marcos Flaks, Neila Sula, Moshumi Seewoogolam and Rose Bill. The tool is used for viewing bond positions and their net balances for a range of dates. When looking at the future date of a bond, the balance is the net of that position after offsetting any closing repo from the total for that day. This feature allows users to know what the future balance of a bond will be and how much they will hold that can further be used to perform repo trades. Thus, it becomes a key tool in deciding how to allocate resources in the future via Sophis.
+
+The tool was rewritten to replace an older tool that ran a static query to build repo ladder. The query was resource intensive and slow. The jira ticket to archive the old tool is here - http://btggamjira/browse/AP-657?jql=text%20~%20%22repomanager%22
+
+The tool is divided into 3 grids - Position Master View, Bond Trades View & Repo Trades View. While the Position Master View shows the net balance of a position, the bond & repo trades view show individual breakdowns by trade and also show additional information pertaining to that trade such as start cash, end cash, net proceeds etc. The grids are built with DevExpress UI and allow many features such as sorting, filtering of data, searching, column reordering, grouping etc. Additional features have been implemented that further enhance the richness of the grids and allow customization. These features are available on the layout toolbar and include creating a new view on the fly, saving a layout, loading a saved layout, painting the cells, printing, creating customized views that can be saved and loaded later, exporting grids in excel or csv etc. These features save loads of user time and gives them freedom to customize the tool as they like. Loading a layout also allows viewing a colleague's customized view without having to send excel spreadsheets in email, thus reducing time in coordinating among team members that maybe separated by continents.
+
+##### BACKGROUND
+
+_What is a Repo trade?_
+A Repurchase agreement, also known as Repo is a short-term contract which allows one party to sell a security at a specified price with an agreement to buy it back at a later date for another specified price. It is done to raise short-term capital by lending the security as collateral for a secured cash loan at a fixed rate of interest. 
+
+There are three types of repurchase agreements used in the market : tri-party, deliverable, and held-in-custody.  In a deliverable repo, an exchange of cash and securities takes place between the parties to the contract. In a held-in-custody agreement, cash is transferred to the seller, who retains the securities in a custody account for the benefit of the buyer.
+
+Repos typically mature the next day (i.e. are entered on an overnight basis), but some repos mature later and are referred to as "term repo". Additionally, some repos are referred to as "open", and have no maturity date; and in these agreements the seller(collateral provider) and buyer(cash lender) can terminate the agreement at any time.
+
+A tri-party repo is the most commonly used form of repos. These repos use a third party - a custodian banker or clearing organization known as the "collateral agent" to act as an intermediary between counterparties to a deal. The role of the collateral agent is crucial: it acts on behalf of both the buyer and seller minimizing the operational burden and receiving and delivering out securities and cash for the counterparties. The collateral agent also prices the securities under the transaction. Use of a collateral agent provides additional protection to investors in the event of a dealer's bankruptcy, by ensuring the securities held as collateral are held separate from the dealer's assets. An increased level of security is further provided in the event of a default by a counterparty by applying "haircuts" on securities purchased.
+
+![Screenshot](Screenshots/Repo.png)
+
+_How are Repos managed  in Sophis?_
+
+When a new repo is booked in Sophis, it goes through several stages from start to finish. At the first stage, a new repo instrument is created in titres table via a tool called RepoTool in Sophis. After creating the instrument, a new trade is done in Purchase/Sale mode. The term purchase/sale is just a business event and is indicated by a flag in histomvts table. The maturity date of the repo is defined by "Finper" at the time of the repo instrument creation. As mentioned earlier, a repo can be kept open in which case, there is no set maturity and can be terminated at any time. Once, the repo is opened, the interest on it is exchanged and entered as a new trade called as "Coupon" trade. Finally, at the time of maturity, a repo is terminated or closed by entering into another trade called as "Exercise" or simply updating the end date of the repo instrument to close it. All of this is done via RepoTool. Below is the diagram showing the complete cycle of events from start to termination.
+
+![Screenshot](Screenshots/SophisRepoCycle.png)
+
+## ARCHITECTURE
+
+
+##### WORKFLOW
+
+![Screenshot](Screenshots/Workflow.png)
+
+##### ARCHITECTURE
+
+In order to build the position ladder, we create a table called Btg_Balance in Oracle DB. When a new trade is booked in Sophis, a trigger called "ADD_POSITION_BALANCE" in Histomvts is triggered to register this position in an intermediate table called Btg_Balance_Helper. The Btg_Balance_Helper table has a materialized view MV_BTG_BALANCE_HELPER that gets refreshed every time a row is committed. This materialized view in-turn invokes a trigger T_MVBTG_BALANCE_HELPER when a row is inserted into the view and runs to insert the row into the  Btg_Balance_Staging table. The Btg_Balance_Staging table is the final table which stores the rows to be processed with sequenceno. The scheduler POPULATE_BTG_BALANCE constantly processes rows in Btg_Balance_Staging every second in the order of its sequenceno making sure each sequenceno is processed in the order once and finally running the algorithm  "PCKG_BTG_SRVC_POSITION_BALANCE.ADD_BALANCE" to populate Btg_Balance table.  After the row is processed, its status whether failed or success is registered in a log table called Btg_Balance_Helper_Scheduler. The last sequence no processed is stored in BTG_BALANCE_HELPER_LAST_SEQ which helps to pick up the sequenceno where we left off after each run.
+
+The BalanceType in Btg_Balance allows for different kinds of balances to be stored. In case of RepoManager, we store the Quantite represented by "Q". If the position is already present, it simply goes and adds the balance to it, thus allowing us to maintain the balance in real time. For any modification of the trade, this table is modified accordingly to reflect the new balance. The package that  is evoked to perform this duty is called "PCKG_BTG_SRVC_POSITION_BALANCE.ADD_BALANCE". This table also serves the purpose of going back to any date and retrieving the balance as of that date thus emulating a timeline.  The Btg_Balance table definition is show below.
+
+|YEAR  |MONTH |DATETYPE|BALANCETYPE|FUNDID    |INSTRUMENTID|STRATEGYID|DEPOSITARYID|DAY1|DAY2     |.......|DAY30    |DAY31    |
+|------|-----:|--------|-----------|---------:|-----------:|---------:|-----------:|---:|--------:|-------|--------:|--------:|
+| 2015 | 4    | VD     | Q         | 10003512 | 68568897   | 79442    | 10006707   | 0  | 1000000 |     | 1000000 | 10000000 |
+
+**Year** - The year of the trade.
+**Month** - The month of the trade.
+**DateType** - 'VD' for value date, 'ED' for expiry date in case of a repo. 
+**BalanceType** - 'Q' for quantite. It allows for different kinds of balances like 'M' for money to be stored for the same position.
+**FundId** - entite
+**InstrumentId** - sicovam
+**StrategyId** - opcvm
+**DepositaryId** - depositaire
+**Day1..Day31** - day of the settlement date
+
+When a repo trade comes along, the trigger creates two entries in the _Btg_Balance_ table. 
+
+Repo trade -> settlement date 4/10/2015 (histomvts.dateval), expected expiry date (titres.finper) 4/15/2015 Quantite -> (-5000)
+
+The first trade represented by Repo Trade is entered as 'VD' on its trade date 4/10/2015. The same trade is entered as 'ED' on its expiry date with negative balance.
+The net balances are shown for each date below which will be reflected on RepoManager in the "BoxPosition" column.
+
+**EXAMPLE**
+
+Assuming, there is an underlying bond whose total quantity is 1000,000 as of 4/1/2015. A Repo trade is done on 4/10/2015 for a quantity -5000. In titres, its maturity date is set to 4/15/2015. It will be entered into the balance table via the package module "PCKG_BTG_SRVC_POSITION_BALANCE.ADD_BALANCE" as below, such that on 4/10/2015 the bond's net quantity is 995000 but when the repo expires on 4/15, it is back to 1000,000.
+
+| |YEAR |MONTH |DATETYPE|BALANCETYPE|FUNDID    |INSTRUMENTID|STRATEGYID|DEPOSITARYID|DAY1| DAY10..   |DAY15..|DAY31    ||
+|------|-|----:|--------|-----------|---------:|-----------:|---------:|-----------:|---:|--------:|---------:|--:|---|
+|| ``` 2015 ```| ```4  ```  | ```VD```    |``` Q  ```       | ```10003512``` | ```69427037 ```  |``` 114221 ```   | ```10006707 ```  | ```1000,000 ``` | ```1000,000``` |   ```1000,000``` | ```1000,0000``` | ```Underlying Bond```|
+|*Repo Trade* | 2015 | 4    | VD     | Q         | 10003512 | 682374228   | 79234    | 10006707   | 0  | -5,000|-5,000 | -5,0000 |
+|*Repo Trade Expired*| 2015 | 4    | ED     | Q         | 10003512 | 682374228   | 79234    | 10006707   | 0  | 0 |  5,000   | 5,000 | |
+||||||||||```1000,000```|```995,000```|```1000,000```||||
+
+There are cases, when the repo trade is modified and a new expiry date is entered in _Titres_. Such cases are handled by creating another trigger on Titres table which updates the btg_balance via the job that runs every second.
+
+
+##### TRIGGERS
+
+
+**HISTOMVTS.ADD_POSITION_BALANCE**
+
+This trigger is invoked on every insert/update/delete of rows on histomvts. The trigger inserts the relevant data into Btg_Balance_Helper.
+
+**TITRES.UPDATE_POSITION_BALANCE**
+
+This trigger is invoked when the repo instrument's expiry is updated and must be reflected so in Btg_balance table. It also insert the data into Btg_Balance_Helper.
+
+**MV_BTG_BALANCE_HELPER.T_MVBTG_BALANCE_HELPER**
+
+This trigger is kicked off whenever a row row is 'committed' in Btg_Balance_Helper table. The MV_BTG_BALANCE_HELPER is a materialized view on Btg_Balance_Helper that gets refreshed everytime a row is committed in Btg_Balance_Helper. The trigger is in essence responsible for  populating Btg_Balance by calling the appropriate method on the package PCKG_BTG_SRVC_POSITION_BALANCE.
+
+##### SCHEDULED JOB
+
+**POPULATE_BTG_BALANCE**
+
+This job is run every second and picks up the rows to be processed from Btg_Balance_Staging table and calls "PCKG_BTG_SRVC_POSITION_BALANCE.ADD_BALANCE" procedure to populate Btg_Balance table.
+	
+**BTG_BLANCE_FORWARD**
+
+Since the ladder shows positions for future dates and if those days span multiple months, it becomes necessary to roll over the last balance that was recorded to future month as well. In the query that retrieves positions for a given range of dates, it will then only look for positions between those dates. Therefore, it is required that a job is scheduled that makes sure the balances are rolled over and new entries are created for each open position so that it is picked by the query running for RepoManager. Currently, a scheduler is setup to run every day to roll forward balances for 80 days in advance starting from the sysdate. If the 80 days span 2 months, then new entries are created in the btg_balance table. The scheduler calls procedure  PCKG_BTG_SRVC_POSITION_BALANCE.ADD_BALANCE_FORWARD (check components section for code).
+	
+##### REFRESH
+
+This feature is disabled in the app config file for now. RepoManager is able to refresh the position as well as trades/repos data every 5 minutes by fetching new/updated/deleted trades from Btg_Balance_Helper and computing the ladder for the affected positions in the application all over. The procedure that gets called is  PCKG_BTG_SRVC_POSITION_BALANCE.GET_CHANGES_REPOMANAGER. This improves performance and only brings a small changed set of data each time, thus enabling RepoManager to always be up-to-date with Sophis. The setting is in milliseconds.
+
+##### VALIDATION
+
+Given the critical aspect of the data and in the event of some database failure, it becomes imperative to validate the position balance each day. The procedure PCKG_BTG_EMAILER_BTG_BALANCE.VALIDATE_BTG_BALANCE_CURRENT achieves the same and will send an email to App Support if the balances are out of sync with Histomvts table.
+
+
+
+```
